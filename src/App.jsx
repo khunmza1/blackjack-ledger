@@ -35,10 +35,8 @@ export default function App() {
 
   // --- Effects for Data Fetching and Subscriptions ---
   useEffect(() => {
-    console.log("App initializing, setting up auth listener...");
     const unsubscribeAuth = onAuthStateChanged(auth, async (user) => {
       if (user) {
-        console.log("Auth state changed: User is signed in with UID:", user.uid);
         try {
           await fetchFavoritePlayers();
           await fetchRecentSessions();
@@ -51,10 +49,8 @@ export default function App() {
           setIsLoading(false);
         }
       } else {
-        console.log("Auth state changed: No user found, attempting anonymous sign-in.");
         try {
             await signInAnonymously(auth);
-            console.log("Anonymous sign-in successful.");
         } catch (error) {
             console.error("Anonymous sign-in failed:", error);
             setIsLoading(false);
@@ -67,12 +63,10 @@ export default function App() {
 
   useEffect(() => {
     if (!sessionId) return;
-    console.log(`Subscribing to session: ${sessionId}`);
     const sessionRef = doc(db, `artifacts/${appId}/public/data/blackjack-sessions`, sessionId);
     const unsubscribe = onSnapshot(sessionRef, (doc) => {
       if (doc.exists()) {
         const sessionData = doc.data();
-        console.log("Received session update:", sessionData);
         setCurrentSession(sessionData);
         if (Object.keys(roundData).length === 0 || sessionData.players.length !== Object.keys(roundData).length) {
             initializeRoundData(sessionData.players);
@@ -90,14 +84,11 @@ export default function App() {
 
   // --- Data Fetching Functions ---
   const fetchFavoritePlayers = async () => {
-    console.log("Fetching favorite players...");
     try {
         const playersRef = collection(db, `artifacts/${appId}/public/data/blackjack_players`);
-        // FIX: Fetch all players and filter client-side to avoid indexing issues.
         const querySnapshot = await getDocs(playersRef);
         const allPlayers = querySnapshot.docs.map(doc => doc.data());
         const favorites = allPlayers.filter(p => p.isFavorite === true);
-        console.log("Favorite players found:", favorites);
         setFavoritePlayers(favorites);
     } catch (error) {
         console.error("Error fetching favorite players:", error);
@@ -105,7 +96,6 @@ export default function App() {
   };
 
   const fetchRecentSessions = async () => {
-    console.log("Fetching recent sessions...");
     try {
         const sessionsRef = collection(db, `artifacts/${appId}/public/data/blackjack-sessions`);
         const thirtyDaysAgo = new Date();
@@ -119,7 +109,6 @@ export default function App() {
             .sort((a, b) => b.data.createdAt.toMillis() - a.data.createdAt.toMillis())
             .map(doc => doc.id);
 
-        console.log("Recent sessions found:", sessions);
         setAvailableSessions(sessions);
     } catch (error) {
         console.error("Error fetching recent sessions:", error);
@@ -177,6 +166,7 @@ export default function App() {
       const { players, dealerId } = currentSession;
       let dealerNet = 0;
       const updatedPlayers = JSON.parse(JSON.stringify(players));
+      const transactionDetails = [];
 
       Object.keys(roundData).forEach(playerId => {
           if (playerId === dealerId) return;
@@ -188,13 +178,16 @@ export default function App() {
           playerRoundData.hands.forEach(hand => {
               const betAmount = hand.bet;
               let amount = 0;
+              let description = `Round vs ${players.find(p=>p.id===dealerId)?.name || 'Dealer'}`;
               switch(hand.outcome) {
-                  case 'win': amount = betAmount; break;
-                  case 'lose': amount = -betAmount; break;
-                  case 'blackjack': amount = betAmount * 1.5; break;
-                  case 'push': amount = 0; break;
+                  case 'win': amount = betAmount; description += ` (Win: ${betAmount})`; break;
+                  case 'lose': amount = -betAmount; description += ` (Loss: ${betAmount})`; break;
+                  case 'blackjack': amount = betAmount * 1.5; description += ` (Blackjack: ${betAmount * 1.5})`; break;
+                  case 'push': amount = 0; description += ` (Push)`; break;
               }
+              if(hand.originalBet) description += ` (Doubled)`;
               playerTotal += amount;
+              transactionDetails.push({ playerId, amount, description });
           });
 
           player.balance += playerTotal;
@@ -204,9 +197,23 @@ export default function App() {
       });
       
       const dealer = updatedPlayers.find(p => p.id === dealerId);
-      if (dealer) dealer.balance += dealerNet;
+      if (dealer) {
+          dealer.balance += dealerNet;
+          transactionDetails.push({ playerId: dealer.id, amount: dealerNet, description: 'Dealer round net' });
+      }
       
-      updateSession({ ...currentSession, players: updatedPlayers });
+      // FIX: Correctly create and append the new transaction log entry
+      const updatedSession = { 
+          ...currentSession, 
+          players: updatedPlayers,
+          transactionLog: [...(currentSession.transactionLog || []), {
+              id: crypto.randomUUID(),
+              timestamp: new Date().toISOString(),
+              type: 'ROUND',
+              details: transactionDetails
+          }]
+      };
+      updateSession(updatedSession);
       initializeRoundData(updatedPlayers);
   };
 
@@ -307,7 +314,18 @@ const GameView = ({ session, favoritePlayers, roundData, setRoundData, onUpdateS
       
       const playerRef = doc(db, `artifacts/${appId}/public/data/blackjack_players`, name);
       const playerDoc = await getDoc(playerRef);
-      const promptPayId = playerDoc.exists() ? playerDoc.data().promptPayId : '';
+      let promptPayId = '';
+
+      if (!playerDoc.exists()) {
+          console.log(`Player "${name}" not found globally. Creating new record.`);
+          await setDoc(playerRef, {
+              name: name,
+              promptPayId: '',
+              isFavorite: false
+          });
+      } else {
+          promptPayId = playerDoc.data().promptPayId || '';
+      }
 
       const newPlayer = { id: crypto.randomUUID(), name, balance: 0, promptPayId, lastBet: 20 };
       const updatedPlayers = [...players, newPlayer];
@@ -645,7 +663,7 @@ const Modal = ({ modal, closeModal, session, onUpdateSession, favoritePlayers, o
             const p = session.players.find(p => p.id === modal.data.playerId);
             title = `${p.name}'s History`;
             const historyLogs = (session?.transactionLog || []).filter(log => log.details && log.details.some(d => d.playerId === p.id));
-            content = `<div class="max-h-96 overflow-y-auto space-y-2 pr-2">${historyLogs.length > 0 ? [...historyLogs].reverse().map(log => { const playerDetail = log.details.find(d => d.playerId === p.id); if (!playerDetail || typeof playerDetail.amount !== 'number') return ''; const amountColor = playerDetail.amount > 0 ? 'text-green-400' : 'text-red-400'; return `<div class="bg-gray-700 p-2 rounded-md flex justify-between items-center"><div><p class="font-medium">${playerDetail.description}</p><p class="text-xs text-gray-400">${new Date(log.timestamp).toLocaleTimeString()}</p></div><p class="font-bold ${amountColor}">${playerDetail.amount > 0 ? '+' : ''}${playerDetail.amount.toFixed(2)}</p></div>`; }).join('') : '<p class="text-gray-400">No transactions yet.</p>'}</div>`;
+            content = `<div class="max-h-96 overflow-y-auto space-y-2 pr-2">${historyLogs.length > 0 ? [...historyLogs].reverse().map((log, index) => { const playerDetail = log.details.find(d => d.playerId === p.id); if (!playerDetail || typeof playerDetail.amount !== 'number') return ''; const amountColor = playerDetail.amount > 0 ? 'text-green-400' : 'text-red-400'; return `<div key=${index} class="bg-gray-700 p-2 rounded-md flex justify-between items-center"><div><p class="font-medium">${playerDetail.description}</p><p class="text-xs text-gray-400">${new Date(log.timestamp).toLocaleTimeString()}</p></div><p class="font-bold ${amountColor}">${playerDetail.amount > 0 ? '+' : ''}${playerDetail.amount.toFixed(2)}</p></div>`; }).join('') : '<p class="text-gray-400">No transactions yet.</p>'}</div>`;
             break;
         case 'show-qr':
             const promptPayQrUrl = `https://promptpay.io/${modal.data.phone}/${parseFloat(modal.data.amount).toFixed(2)}.png`;
