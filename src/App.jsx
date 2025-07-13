@@ -32,6 +32,15 @@ export default function App() {
   const [modal, setModal] = useState({ isOpen: false, type: null, data: null });
   const [userIp, setUserIp] = useState('...');
   const [landscapeState, setLandscapeState] = useState({ activePlayerIndex: 0, activeHandIndex: 0 });
+  const [toast, setToast] = useState({ show: false, message: '', type: 'success' });
+
+  // --- Toast Notification Logic ---
+  const showToast = (message, type = 'success') => {
+    setToast({ show: true, message, type });
+    setTimeout(() => {
+      setToast({ show: false, message: '', type: 'success' });
+    }, 3000);
+  };
 
   // --- Effects for Data Fetching and Subscriptions ---
   useEffect(() => {
@@ -120,7 +129,7 @@ export default function App() {
     const newRoundData = {};
     players.forEach(player => {
       newRoundData[player.id] = {
-        hands: [{ bet: player.lastBet || 20, outcome: 'lose' }]
+        hands: [{ bet: player.lastBet || 20, outcome: null }] // FIX: Default outcome is null
       };
     });
     setRoundData(newRoundData);
@@ -164,6 +173,19 @@ export default function App() {
   
   const handleRecordRound = () => {
       const { players, dealerId } = currentSession;
+      
+      // FIX: Check for unselected outcomes before recording
+      for (const playerId in roundData) {
+          if (playerId === dealerId) continue;
+          for (const hand of roundData[playerId].hands) {
+              if (hand.outcome === null) {
+                  const playerName = players.find(p => p.id === playerId)?.name || 'A player';
+                  showToast(`Please select an outcome for ${playerName}.`, 'error');
+                  return; // Stop the function
+              }
+          }
+      }
+
       let dealerNet = 0;
       const updatedPlayers = JSON.parse(JSON.stringify(players));
       const transactionDetails = [];
@@ -202,7 +224,6 @@ export default function App() {
           transactionDetails.push({ playerId: dealer.id, amount: dealerNet, description: 'Dealer round net' });
       }
       
-      // FIX: Correctly create and append the new transaction log entry
       const updatedSession = { 
           ...currentSession, 
           players: updatedPlayers,
@@ -256,6 +277,7 @@ export default function App() {
 
   return (
     <>
+      <Toast toast={toast} />
       <div id="desktop-view" className="app-container">
         <header>
           <h1>Blackjack Night Ledger</h1>
@@ -289,6 +311,15 @@ export default function App() {
 
 // --- Sub-Components ---
 
+const Toast = ({ toast }) => {
+    if (!toast.show) return null;
+    return (
+        <div className={`toast ${toast.type}`}>
+            {toast.message}
+        </div>
+    );
+};
+
 const SessionManager = ({ availableSessions, onStartNew, onLoad }) => (
   <div className="card max-w-lg mx-auto">
     <h2 className="section-title">Session Management</h2>
@@ -317,7 +348,6 @@ const GameView = ({ session, favoritePlayers, roundData, setRoundData, onUpdateS
       let promptPayId = '';
 
       if (!playerDoc.exists()) {
-          console.log(`Player "${name}" not found globally. Creating new record.`);
           await setDoc(playerRef, {
               name: name,
               promptPayId: '',
@@ -662,8 +692,28 @@ const Modal = ({ modal, closeModal, session, onUpdateSession, favoritePlayers, o
         case 'history':
             const p = session.players.find(p => p.id === modal.data.playerId);
             title = `${p.name}'s History`;
-            const historyLogs = (session?.transactionLog || []).filter(log => log.details && log.details.some(d => d.playerId === p.id));
-            content = `<div class="max-h-96 overflow-y-auto space-y-2 pr-2">${historyLogs.length > 0 ? [...historyLogs].reverse().map((log, index) => { const playerDetail = log.details.find(d => d.playerId === p.id); if (!playerDetail || typeof playerDetail.amount !== 'number') return ''; const amountColor = playerDetail.amount > 0 ? 'text-green-400' : 'text-red-400'; return `<div key=${index} class="bg-gray-700 p-2 rounded-md flex justify-between items-center"><div><p class="font-medium">${playerDetail.description}</p><p class="text-xs text-gray-400">${new Date(log.timestamp).toLocaleTimeString()}</p></div><p class="font-bold ${amountColor}">${playerDetail.amount > 0 ? '+' : ''}${playerDetail.amount.toFixed(2)}</p></div>`; }).join('') : '<p class="text-gray-400">No transactions yet.</p>'}</div>`;
+            // FIX: Correctly filter transaction log
+            const historyLogs = (session?.transactionLog || [])
+                .map(log => ({ ...log, details: log.details.filter(d => d.playerId === p.id) }))
+                .filter(log => log.details.length > 0);
+            content = (
+                <div className="history-modal-content">
+                    {historyLogs.length > 0 ? [...historyLogs].reverse().map((log) => (
+                        <div key={log.id} className="history-item">
+                            <div className="history-icon">
+                                {log.details[0].amount > 0 ? '▲' : log.details[0].amount < 0 ? '▼' : '●'}
+                            </div>
+                            <div className="history-details">
+                                <p className="font-medium">{log.details[0].description}</p>
+                                <p className="text-xs text-gray-400">{new Date(log.timestamp).toLocaleTimeString()}</p>
+                            </div>
+                            <p className={`font-bold ${log.details[0].amount > 0 ? 'text-green-400' : 'text-red-400'}`}>
+                                {log.details[0].amount > 0 ? '+' : ''}{log.details[0].amount.toFixed(2)}
+                            </p>
+                        </div>
+                    )) : '<p class="text-gray-400">No transactions yet.</p>'}
+                </div>
+            );
             break;
         case 'show-qr':
             const promptPayQrUrl = `https://promptpay.io/${modal.data.phone}/${parseFloat(modal.data.amount).toFixed(2)}.png`;
